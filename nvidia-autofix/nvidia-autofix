@@ -1,0 +1,38 @@
+#!/bin/bash
+# Makes sure every installed kernel that has Ubuntu's prebuilt NVIDIA module package also has a working nvidia.ko, then loads the module on the running kernel.
+# The package builds nvidia.ko at install time with objtool from the kernel's headers package; when a kernel arrives without its headers (phased updates can move the kernel and NVIDIA metapackages ahead of the headers metapackage), the build fails and the package is left half-configured.
+# Run as root. Without root it only reports what it would fix.
+set -u
+log() { echo "nvidia-autofix: $*"; }
+dry=0
+[ "$(id -u)" -eq 0 ] || { dry=1; log "not root, reporting only"; }
+
+broken=()
+for img in /boot/vmlinuz-*; do
+  k=${img#/boot/vmlinuz-}
+  pkg=$(dpkg-query -W -f='${Package} ${db:Status-Abbrev}\n' "linux-modules-nvidia-*-$k" 2>/dev/null | awk '$2 ~ /^i/ {print $1; exit}')
+  [ -n "$pkg" ] || continue
+  modinfo -k "$k" nvidia >/dev/null 2>&1 && continue
+  log "$k: $pkg is installed but nvidia.ko is missing"
+  broken+=("$k")
+done
+
+if [ ${#broken[@]} -gt 0 ]; then
+  if [ $dry -eq 1 ]; then
+    log "would install: $(printf 'linux-headers-%s ' "${broken[@]}")and run dpkg --configure -a"
+    exit 1
+  fi
+  for k in "${broken[@]}"; do
+    apt-get install -y -o DPkg::Lock::Timeout=900 "linux-headers-$k" || log "$k: could not install linux-headers-$k"
+  done
+  dpkg --configure -a || log "dpkg --configure -a failed"
+  for k in "${broken[@]}"; do
+    modinfo -k "$k" nvidia >/dev/null 2>&1 && log "$k: fixed" || log "$k: still no nvidia.ko"
+  done
+fi
+
+if [ ! -d /sys/module/nvidia ] && modinfo nvidia >/dev/null 2>&1; then
+  if [ $dry -eq 1 ]; then log "would load the nvidia module"; exit 1; fi
+  modprobe nvidia && log "nvidia module loaded" || log "modprobe nvidia failed"
+fi
+exit 0
